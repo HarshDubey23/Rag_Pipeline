@@ -1,0 +1,231 @@
+================================================================================
+PROJECT: PDF RAG CHATBOT - COMPLETE DOCUMENTATION
+Folder:  C:\Users\Lenovo\Downloads\pro
+Stack:   Python + LangChain + ChromaDB + Google Gemini API + Streamlit
+================================================================================
+
+WHAT THIS PROJECT IS
+--------------------------------------------------------------------------------
+A chatbot that answers questions about a PDF document
+(RSNA_Knee_Abnormality_Winning_Blueprint_TechnicalDoc_v2.0_2026-08-09.pdf).
+It uses RAG (Retrieval-Augmented Generation): instead of letting the AI guess
+from general knowledge, we first SEARCH the PDF for relevant passages and give
+ONLY those passages to the AI, so answers are grounded in the real document.
+Every answer also shows which pages it came from (citations).
+
+FILES IN THE PROJECT
+--------------------------------------------------------------------------------
+rag.py            -> Backend brain: ingestion pipeline + Q&A function.
+                     Can be imported as a module OR run in terminal.
+app.py            -> Frontend: Streamlit web chat UI. Imports rag.py.
+requirements.txt  -> List of libraries to install.
+.env              -> Contains Gemini_API_Key="..." (SECRET - never share/commit)
+chroma_db/        -> The vector database folder (created by ingestion).
+                     Delete it = force full re-ingestion next run.
+about.txt         -> This file.
+
+ARCHITECTURE (BIG PICTURE)
+--------------------------------------------------------------------------------
+                    INGESTION (one time per PDF)
+    PDF --> PyPDFLoader --> TextSplitter --> Embeddings --> ChromaDB
+     (pages)      (50 pages)   (163 chunks)  (3072-dim      (saved on disk
+                                              vectors)       in chroma_db/)
+
+                    QUERY TIME (every question you ask)
+    Question --> embed question --> Chroma finds top-5 similar chunks
+          --> chunks + question sent to Gemini --> answer + page citations
+
+
+RAG.PY - EVERY PIECE EXPLAINED
+--------------------------------------------------------------------------------
+CONFIG CONSTANTS (top of file)
+  GOOGLE_API_KEY : read from .env via python-dotenv.
+  PDF_PATH       : which PDF to ingest.
+  CHROMA_DIR     : folder where the vector DB is saved ("chroma_db").
+  CHUNK_SIZE=1000   : each text chunk is max ~1000 characters.
+  CHUNK_OVERLAP=200 : consecutive chunks share 200 chars so a sentence cut at
+                      a boundary still appears fully in the next chunk.
+  TOP_K=5        : number of chunks retrieved for every question.
+
+ThrottledEmbeddings CLASS (rate-limit protection)
+  Google free tier allows only ~100 embedding requests/minute. Bulk ingesting
+  163 chunks would break that limit (error 429). This class:
+    - embed_documents(): splits texts into batches of 50, sleeps 3s between
+      batches, and if a 429 happens anyway retries with exponential backoff
+      (5s, 10s, 20s, 40s) up to 5 attempts.
+    - embed_query(): single question vector, passed straight through.
+
+get_embeddings()
+  Creates GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001").
+  This model converts any text into a list of 3072 numbers (a vector).
+  Similar meanings -> similar vectors -> we can find them by distance math.
+
+build_vectorstore(force=False)  -- THE INGESTION PIPELINE
+  Step-by-step, what actually happens:
+   1. If force=True, deletes chroma_db folder completely (clean rebuild).
+   2. If chroma_db already exists -> skips ingestion, just loads it.
+   3. PyPDFLoader(PDF_PATH).load() -> reads the PDF page by page into Document
+      objects. Each Document has .page_content (the text) and .metadata
+      (including "page" number). Result: 50 documents.
+   4. RecursiveCharacterTextSplitter splits each page into chunks:
+        - tries separators in order: "\n\n" (paragraphs), then "\n" (lines),
+          then ". " (sentences), then " " (words), then hard-cut.
+        - It keeps paragraphs together when possible, only splitting smaller
+          when a paragraph exceeds chunk_size. This keeps related text
+          together so each chunk is meaningful on its own.
+      Result: 163 chunks of ~1000 chars with 200 char overlap.
+   5. Chroma.from_documents(...) -> embeds every chunk (through
+      ThrottledEmbeddings) and stores text+vector+metadata in chroma_db/.
+   6. Returns a Chroma object connected to the saved database.
+
+format_docs(docs)
+  Builds ONE context string from retrieved chunks, tagging each with its page:
+      "[Page 3]\n...text..."
+  Page numbers are 0-based inside metadata, so we add 1 for humans.
+
+format_sources(docs)
+  Makes the citation line, e.g. "Page 3, Page 12" (sorted, no duplicates).
+
+SYSTEM_PROMPT
+  Tells the model: answer ONLY from context; if not there, say so; mention
+  which [Page N] tags it used.
+
+_generation_chain  (LangChain LCEL pipe syntax)
+      _prompt | ChatGoogleGenerativeAI(gemini-3.6-flash, temp=0.2) | StrOutputParser()
+  Prompt template -> LLM -> plain string output.
+
+ask(question, vectorstore=None)   <-- THE MAIN FUNCTION app.py CALLS
+   1. retriever = vectorstore.as_retriever(k=5)
+   2. docs = retriever.invoke(question)      # find top-5 similar chunks
+   3. answer = _generation_chain.invoke({context, question})
+   4. return {"answer": ..., "sources": "Page 1, Page 7, ..."}
+
+main()
+  Terminal chat loop: python rag.py [--rebuild]. Prints answer + Sources line.
+
+
+APP.PY - FRONTEND, AND HOW IT CONNECTS TO THE BACKEND
+--------------------------------------------------------------------------------
+Streamlit reruns the whole script top-to-bottom on EVERY user action (every
+message, every button click). That's why two tricks are used:
+
+  1. @st.cache_resource on get_vectorstore()
+     Loading Chroma is slow-ish; caching means it loads ONCE per server,
+     not on every rerun. st.cache_resource.clear() drops this cache.
+
+  2. st.session_state["messages"]
+     A list of {"role","content","sources"} dicts holding chat history so old
+     messages don't disappear on rerun. After every exchange the new message
+     is appended, and the replay loop redraws all history each rerun.
+
+API KEY BRIDGE (important!)
+  Locally: rag.py reads .env. On Streamlit Cloud there is NO .env file, so
+  app.py copies st.secrets["Gemini_API_Key"] into os.environ BEFORE importing
+  rag. Same code works in both places.
+
+FLOW OF ONE QUESTION IN THE APP:
+  user types in st.chat_input
+    -> appended to session_state.messages
+    -> rag.ask(question, get_vectorstore()) runs the whole RAG chain
+    -> answer shown with st.markdown, citations with st.caption
+    -> assistant message saved to session_state.messages
+
+SIDEBAR "Rebuild Vector Database" button:
+  clears cache -> rag.build_vectorstore(force=True) re-ingests PDF from
+  scratch -> st.rerun() refreshes page.
+
+
+MODELS USED
+--------------------------------------------------------------------------------
+Embeddings : models/gemini-embedding-001 (3072-dimension vectors)
+LLM        : gemini-3.6-flash (temperature 0.2 = factual, low randomness)
+NOTE: if you ever change the embedding model you MUST rebuild chroma_db,
+otherwise new query vectors won't match stored ones (silent bad results).
+
+
+ALL IMPORTANT TERMINAL COMMANDS (and WHY)
+--------------------------------------------------------------------------------
+# 1. Install all dependencies (run once, or after requirements.txt changes)
+pip install -r requirements.txt
+
+# 2. Start the WEB APP (this is the main way to use the project)
+streamlit run app.py
+#    -> opens browser at http://localhost:8501
+
+# 3. Terminal-only chatbot (no web UI), using existing database
+python rag.py
+
+# 4. Full re-ingestion of the PDF, then terminal chat
+python rag.py --rebuild
+#    WHY: use after changing the PDF, changing chunk size, or changing the
+#    embedding model. It deletes chroma_db and rebuilds from scratch.
+
+# 5. Quick one-shot test without the UI (sanity check)
+python -c "import rag; print(rag.ask('What is this document about?'))"
+
+# 6. USING A DIFFERENT PDF:
+#    a) Put your new PDF in the pro folder.
+#    b) Open rag.py, change the PDF_PATH line, e.g.:
+#         PDF_PATH = "my_new_document.pdf"
+#    c) Delete the old database (either way works):
+#         Remove-Item -Recurse -Force chroma_db        (PowerShell)
+#         rmdir /s /q chroma_db                        (CMD)
+#    d) Rebuild:
+#         python rag.py --rebuild
+#       or simply start streamlit and press the sidebar button
+#       "Rebuild Vector Database".
+#
+#    TIP: to support MULTIPLE PDFs later, load several files with
+#    PyPDFLoader and pass all docs to the splitter - no other change needed.
+
+
+DEPLOYMENT (FREE, EASY - Streamlit Community Cloud)
+--------------------------------------------------------------------------------
+LOCAL RUN FIRST:
+  1. pip install -r requirements.txt
+  2. Make sure .env has:  Gemini_API_Key="your-key"
+  3. streamlit run app.py
+
+DEPLOY TO STREAMLIT COMMUNITY CLOUD (free):
+  1. Create a GitHub account (if you don't have one) and a NEW REPOSITORY,
+     e.g. "pdf-rag-chatbot" (can be private).
+  2. Push ONLY these files (NOT .env, NOT chroma_db/, NOT __pycache__/):
+       app.py, rag.py, requirements.txt, about.txt, and the PDF file.
+     Commands from the pro folder:
+       git init
+       git add app.py rag.py requirements.txt about.txt RSNA_Knee_Abnormality_Winning_Blueprint_TechnicalDoc_v2.0_2026-08-09.pdf
+       git commit -m "PDF RAG chatbot"
+       git branch -M main
+       git remote add origin https://github.com/<your-username>/pdf-rag-chatbot.git
+       git push -u origin main
+     IMPORTANT: never push .env (it contains your secret API key).
+  3. Go to https://share.streamlit.io  -> sign in with GitHub ->
+     "Create app" -> select your repo -> main file: app.py -> Deploy.
+  4. Add the secret: in the app -> Settings (Manage app) -> Secrets ->
+     paste:
+       Gemini_API_Key = "your-key-here"
+  5. Done. On first question in the cloud the app builds chroma_db
+     automatically (takes a few minutes because of rate-limit throttling).
+     Free cloud containers can sleep/reset; the DB just rebuilds on demand.
+
+DEBUGGING HISTORY (what problems we solved - useful context)
+--------------------------------------------------------------------------------
+- 403 PERMISSION_DENIED on embeddings: original key's project was blocked by
+  Google at account level; new keys under same account kept failing. Fixed by
+  generating a key under a different Google account.
+- 404 model retired: gemini-2.0-flash no longer available -> switched to
+  gemini-3.6-flash.
+- 429 RESOURCE_EXHAUSTED during ingestion: free tier = 100 embed req/min ->
+  fixed with ThrottledEmbeddings batching/backoff.
+- langchain.chains import error: legacy scripts used APIs removed in
+  langchain 1.x -> those scripts were deleted; current code uses pure LCEL.
+
+FUTURE IMPROVEMENT IDEAS
+--------------------------------------------------------------------------------
+- Multiple PDF support (folder input, CLI argument).
+- Switch to langchain-chroma package (current Chroma class is deprecated).
+- MMR or hybrid BM25+vector retrieval for better matches.
+- Chat memory (follow-up questions referencing earlier turns).
+- Show chunk-level source snippets, not just page numbers.
+- Evaluation set of Q&A pairs to measure retrieval quality.
+================================================================================
