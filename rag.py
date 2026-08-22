@@ -174,11 +174,28 @@ _prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-_generation_chain = (
-    _prompt
-    | ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.2)
-    | StrOutputParser()
-)
+_generation_chain = None
+
+
+def _get_generation_chain():
+    """Build the LLM chain lazily (first use) so importing this module never
+    fails on a missing/invalid API key - important for Streamlit Cloud,
+    where the key arrives via st.secrets before first use."""
+    global _generation_chain
+    if _generation_chain is None:
+        if not GOOGLE_API_KEY:
+            raise RuntimeError(
+                "Gemini_API_Key is not set. Locally put it in .env; on "
+                "Streamlit Cloud add it under Manage app -> Settings -> Secrets."
+            )
+        _generation_chain = (
+            _prompt
+            | ChatGoogleGenerativeAI(
+                model=LLM_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.2
+            )
+            | StrOutputParser()
+        )
+    return _generation_chain
 
 
 def ask(question, vectorstore=None):
@@ -187,8 +204,8 @@ def ask(question, vectorstore=None):
         vectorstore = build_vectorstore()
 
     retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-    docs = retriever.invoke(question)                 # retrieve top-k chunks
-    answer = _generation_chain.invoke(                 # LLM answers from them
+    docs = retriever.invoke(question)                     # retrieve top-k chunks
+    answer = _get_generation_chain().invoke(              # LLM answers from them
         {"context": format_docs(docs), "question": question}
     )
     return {"answer": answer, "sources": format_sources(docs)}

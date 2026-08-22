@@ -20,7 +20,15 @@ if not os.getenv("Gemini_API_Key"):
     try:
         os.environ["Gemini_API_Key"] = st.secrets["Gemini_API_Key"]
     except Exception:
-        pass  # rag.py will fail with a clear error if the key is truly missing
+        pass  # handled below
+
+if not os.getenv("Gemini_API_Key"):
+    st.error(
+        "Gemini_API_Key is missing. Locally: add it to the .env file. "
+        "On Streamlit Cloud: Manage app -> Settings -> Secrets, then add "
+        'Gemini_API_Key = "your-key"'
+    )
+    st.stop()
 
 import rag  # noqa: E402  (import AFTER the env bridge above)
 
