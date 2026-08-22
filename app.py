@@ -18,15 +18,20 @@ import streamlit as st
 # .env file, so we copy the secret into os.environ BEFORE importing rag.
 if not os.getenv("Gemini_API_Key"):
     try:
-        os.environ["Gemini_API_Key"] = st.secrets["Gemini_API_Key"]
+        os.environ["Gemini_API_Key"] = str(st.secrets["Gemini_API_Key"]).strip()
     except Exception:
         pass  # handled below
 
 if not os.getenv("Gemini_API_Key"):
+    try:
+        present = list(st.secrets.keys())
+    except Exception:
+        present = []
     st.error(
         "Gemini_API_Key is missing. Locally: add it to the .env file. "
         "On Streamlit Cloud: Manage app -> Settings -> Secrets, then add "
-        'Gemini_API_Key = "your-key"'
+        'Gemini_API_Key = "your-key" (with quotes), Save, then REBOOT the app. '
+        f"(Secret keys currently visible to the app: {present})"
     )
     st.stop()
 
